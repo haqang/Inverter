@@ -1,0 +1,24 @@
+# Các thư mục biên dịch sinh ra (Cực nặng, không được đẩy lên)
+Debug/
+Release/
+bin/
+obj/
+
+# Các tệp cấu hình cá nhân hoặc tệp tạm của IDE
+*.local
+*.cdkws
+*.mxproject
+.settings/
+.metadata/
+
+# Các file nạp và tệp tạm Keil C (nếu bác dùng Keil)
+*.bak
+*.dep
+*.iex
+*.lnp
+*.htm
+*.build_log.htm
+*.axf
+*.hex
+*.lst
+*.map
