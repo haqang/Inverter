@@ -286,7 +286,7 @@ typedef struct {
        Vs_local = V_F_K * fout_hz;
      float m_local  = Vs_local / VDC;
 
-     if (m_local > 1.154f) m_local = 1.154f;  // Mở rộng không gian vector lên kịch trần
+     if (m_local > 0.866f) m_local = 0.866f;  // Mở rộng không gian vector lên kịch trần
      if (m_local < 0.0f)   m_local = 0.0f;
 
      for (uint16_t i = 0; i < N; i++)
@@ -1049,7 +1049,7 @@ uint16_t Read_ADC(void)
 void VF_Frequency_Ramp(float target_freq)
 {
     const float FREQ_STEP = 0.003f;
-    const float VF_STEP   = 0.0001f;
+    const float VF_STEP   = 0.0000088f;
 
     /* Giới hạn tần số */
     if(target_freq < FREQ_MIN) target_freq = FREQ_MIN;
@@ -1064,7 +1064,7 @@ void VF_Frequency_Ramp(float target_freq)
         if(V_f_freq <= 20.0f)
             V_F_K -= VF_STEP;
         else
-            V_F_K = 0.5f;
+            V_F_K = 0.456f;
     }
 
     /* Ramp giảm */
@@ -1076,7 +1076,7 @@ void VF_Frequency_Ramp(float target_freq)
         if(V_f_freq <= 20.0f)
             V_F_K += VF_STEP;
         else
-            V_F_K = 0.5f;
+            V_F_K = 0.456f;
     }
 
     /* Chặn chắc chắn không xuống dưới FREQ_MIN */
@@ -1084,8 +1084,8 @@ void VF_Frequency_Ramp(float target_freq)
     if(V_f_freq > FREQ_MAX) V_f_freq = FREQ_MAX;
 
     /* Giới hạn hệ số V/f */
-    if(V_F_K > 1.0f) V_F_K = 1.0f;
-    if(V_F_K < 0.5f) V_F_K = 0.5f;
+    if(V_F_K > 0.5f) V_F_K = 0.5f;
+    if(V_F_K < 0.456f) V_F_K = 0.456f;
 }
 void Process_ADC_And_RF_Transmit(void)
 {
@@ -1108,7 +1108,34 @@ void Process_ADC_And_RF_Transmit(void)
         float act_val = 0.0f;
 
         Calculate_Actual_Params(adc_copy, freq_run, &act_freq, &act_val, sel);
+        // CHỐT CHẶN BẢO VỆ QUÁ DÒNG PHẦN MỀM (SOFTWARE TRIP)
+                // Ngưỡng ngắt: 9.5 Ampe (Sát trần dải đo 10A của đồ án)
+                // =======================================================
+                if (act_val > 9.5f)
+                {
+                    // 1. Khóa cứng ngõ ra PWM phần cứng ngay lập tức
+                    __HAL_TIM_MOE_DISABLE(&htim1);
+                    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+                    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+                    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0);
 
+                    // 2. Chuyển trạng thái hệ thống về OFF
+                    system_state.on_off = 0;
+                    svm_enable = 0;
+
+                    // 3. Reset tần số về mức an toàn ban đầu
+                    target_freq = FREQ_MIN;
+                    freq_run = FREQ_MIN;
+                    freq_cmd = FREQ_MIN;
+
+                    // 4. (Tùy chọn) Bật đèn LED trên mạch để báo hiệu lỗi
+                    LED_ON();
+                }
+                else
+                {
+                    // Tắt LED nếu dòng điện bình thường
+                    // LED_OFF();
+                }
         // TÌM MIN/MAX CỦA ĐỒ THỊ NGAY TẠI GỐC (BÊN BIẾN TẦN)
                 // =======================================================
                 uint16_t local_min = 4095;

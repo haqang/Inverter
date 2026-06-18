@@ -13,9 +13,9 @@
 ../Core/Src/main.c:994:6:Task_RF_Receive	9
 ../Core/Src/main.c:1037:10:Read_ADC	1
 ../Core/Src/main.c:1049:6:VF_Frequency_Ramp	13
-../Core/Src/main.c:1090:6:Process_ADC_And_RF_Transmit	16
-../Core/Src/main.c:1188:6:HAL_ADC_ConvCpltCallback	2
-../Core/Src/main.c:1202:6:Task_SVM_Background	5
-../Core/Src/main.c:1235:6:Start_ADC_Capture_200Samples	6
-../Core/Src/main.c:1273:6:Calculate_Actual_Params	11
-../Core/Src/main.c:1339:6:Error_Handler	1
+../Core/Src/main.c:1090:6:Process_ADC_And_RF_Transmit	19
+../Core/Src/main.c:1215:6:HAL_ADC_ConvCpltCallback	2
+../Core/Src/main.c:1229:6:Task_SVM_Background	5
+../Core/Src/main.c:1262:6:Start_ADC_Capture_200Samples	6
+../Core/Src/main.c:1300:6:Calculate_Actual_Params	11
+../Core/Src/main.c:1366:6:Error_Handler	1
