@@ -392,30 +392,19 @@ typedef struct {
           float v_phase_rms_set = Vs_local / 1.4142135f;
 
           // 1. Khai báo thông số tải thực tế đang cắm
-              float motor_power_watts = 50.0f; // Đang cắm tải 50W
+              float motor_power_watts = 2000.0f; // Đang cắm tải 50W
               float motor_cos_phi = 0.98f;     // Hệ số công suất 0.98
 
           // 3. Tính dòng điện pha RMS đặt (I = 50 / (U_pha * cos_phi))
               if (v_phase_rms_set > 2.0f)
-                  {
-                      // Áp dụng công thức dòng điện: I = P / (U * cos_phi)
-                      float calculated_i_rms = motor_power_watts / (v_phase_rms_set * motor_cos_phi);
+              {
+                  i_rms_set = motor_power_watts / (3.0f * v_phase_rms_set * motor_cos_phi);
 
-                      // BẪY AN TOÀN CHO TẢI 50W:
-                      // Với tải 50W 3 pha 220V, dòng định mức chỉ rơi vào khoảng 0.08A.
-                      // Ngay cả khi chạy ở tần số siêu thấp (áp thấp), ta cũng không nên để
-                      // dòng đặt vọt lên quá cao. Ta chốt trần (Clamp) ở mức 1.5 Ampe.
-                      if (calculated_i_rms > 1.5f) {
-                          i_rms_set = 1.5f;
-                      } else {
-                          i_rms_set = calculated_i_rms;
-                      }
-                  }
-                  else
-                  {
-                      // Khi điện áp dưới 2V (coi như biến tần đang dừng), chốt dòng đặt bằng 0
-                      i_rms_set = 0.0f;
-                  }
+              }
+              else
+              {
+                  i_rms_set = 0.0f;
+              }
           // -----------------------------------------
  }
 void VF_Frequency_Ramp(float target_freq);
@@ -463,7 +452,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
             VF_Frequency_Ramp(target_freq);
             freq_run = V_f_freq;
 
-            if (fabsf(freq_run - last_freq_for_rebuild) >= 0.5f)
+            if (fabsf(freq_run - last_freq_for_rebuild) >= 0.1f)
             {
                 svm_need_rebuild = 1;
                 last_freq_for_rebuild = freq_run;
@@ -1048,44 +1037,57 @@ uint16_t Read_ADC(void)
 
 void VF_Frequency_Ramp(float target_freq)
 {
-    const float FREQ_STEP = 0.003f;
-    const float VF_STEP   = 0.0000088f;
+    // ===============================================================
+    // 1. THÊM BỘ SỐ SÀN: TẠO "VÙNG ĐI CHẬM" ĐỂ CỨU ÁP Ở 10HZ
+    // ===============================================================
+    float current_freq_step;
 
-    /* Giới hạn tần số */
+    // Nếu tần số đang loanh quanh mốc yếu áp (8Hz đến 12Hz)
+    // Phải đi siêu chậm để rotor bám kịp từ trường, chống vọt dòng
+    if (V_f_freq >= 19.0f && V_f_freq <= 23.0f) {
+        current_freq_step = 0.0005f;
+    } else {
+        current_freq_step = 0.0032f; // Ngoài vùng đó thì tăng tốc độ bình thường
+    }
+
+    /* 2. Giới hạn tần số mục tiêu */
     if(target_freq < FREQ_MIN) target_freq = FREQ_MIN;
     if(target_freq > FREQ_MAX) target_freq = FREQ_MAX;
 
-    /* Ramp tăng */
+    /* 3. CHỈ RAMP TẦN SỐ (Không dùng -= VF_STEP ở đây nữa) */
     if(V_f_freq < target_freq)
     {
-        V_f_freq += FREQ_STEP;
+        V_f_freq += current_freq_step;
         if(V_f_freq > target_freq) V_f_freq = target_freq;
-
-        if(V_f_freq <= 20.0f)
-            V_F_K -= VF_STEP;
-        else
-            V_F_K = 0.456f;
     }
-
-    /* Ramp giảm */
     else if(V_f_freq > target_freq)
     {
-        V_f_freq -= FREQ_STEP;
+        V_f_freq -= current_freq_step;
         if(V_f_freq < target_freq) V_f_freq = target_freq;
-
-        if(V_f_freq <= 20.0f)
-            V_F_K += VF_STEP;
-        else
-            V_F_K = 0.456f;
     }
 
-    /* Chặn chắc chắn không xuống dưới FREQ_MIN */
-    if(V_f_freq < FREQ_MIN) V_f_freq = FREQ_MIN;
-    if(V_f_freq > FREQ_MAX) V_f_freq = FREQ_MAX;
+    // ===============================================================
 
-    /* Giới hạn hệ số V/f */
-    if(V_F_K > 0.5f) V_F_K = 0.5f;
-    if(V_F_K < 0.456f) V_F_K = 0.456f;
+    // ===============================================================
+    if (V_f_freq <= 4.0f)
+    {
+        V_F_K = 0.65f;
+    }
+    else if (V_f_freq <= 20.0f)
+    {
+        // Công thức đường thẳng thay cho việc trừ dồn:
+        // Đảm bảo 100% khi V_f_freq = 10.0 thì V_F_K = 0.456000
+        V_F_K = 0.65f - 0.016875f * (V_f_freq - 4.0f);
+    }
+    else
+    {
+        // Quá 10Hz là chốt cứng ở 0.456 mãi mãi
+        V_F_K = 0.38f;
+    }
+
+    /* 5. Chốt chặn an toàn cuối cùng */
+    if(V_F_K > 0.65f) V_F_K = 0.65f;
+    if(V_F_K < 0.38f) V_F_K = 0.38;
 }
 void Process_ADC_And_RF_Transmit(void)
 {
@@ -1102,16 +1104,34 @@ void Process_ADC_And_RF_Transmit(void)
                 // COPY TRỰC TIẾP: Vì mảng gốc giờ đã là 200 điểm của đúng sóng cần thiết
         memcpy(adc_copy, adc_buffer, sizeof(adc_buffer));
         // 1. BỘ LỌC ĐỒ THỊ (WAVEFORM FILTER) CHO I_CUON_CAM VÀ U_DC
-
-
-        float act_freq = 0;
-        float act_val = 0.0f;
-
-        Calculate_Actual_Params(adc_copy, freq_run, &act_freq, &act_val, sel);
-        // CHỐT CHẶN BẢO VỆ QUÁ DÒNG PHẦN MỀM (SOFTWARE TRIP)
-                // Ngưỡng ngắt: 9.5 Ampe (Sát trần dải đo 10A của đồ án)
+        // 1. TÌM MIN/MAX CỦA ĐỒ THỊ NGAY TỪ ĐẦU (BẮT DÒNG ĐỈNH)
                 // =======================================================
-                if (act_val > 9.5f)
+        // =======================================================
+                // 1. LỌC GAI NHIỄU ĐỈNH (CHỐNG KÍCH HOẠT ẢO KHỐI BẢO VỆ DO GAI XUNG IGBT)
+                // =======================================================
+                uint16_t local_min = 4095;
+                uint16_t local_max = 0;
+
+                // Quét lọc trung bình trượt 3 điểm để san phẳng các gai nhọn lọt cuộn cảm
+                for (int i = 1; i < ADC_TOTAL_SAMPLES - 1; i++)
+                {
+                    uint16_t filtered_sample = (adc_copy[i-1] + adc_copy[i] + adc_copy[i+1]) / 3;
+                    if (filtered_sample < local_min) local_min = filtered_sample;
+                    if (filtered_sample > local_max) local_max = filtered_sample;
+                }
+                if (local_max == local_min) local_max = local_min + 1; // Chống chia 0
+                // =======================================================
+                // 2. CHỐT CHẶN BẢO VỆ THEO DÒNG ĐỈNH (PEAK CURRENT) -10A -> 10A
+                // =======================================================
+                // Tính toán dòng điện đỉnh âm và đỉnh dương ra Ampe thực tế
+                float v_min_pin = (float)local_min * 3.3f / 4095.0f;
+                float v_max_pin = (float)local_max * 3.3f / 4095.0f;
+
+                float peak_current_min = (v_min_pin - 1.5f) / (8.2f * 0.68f * 0.025f);
+                float peak_current_max = (v_max_pin - 1.5f) / (8.2f * 0.68f * 0.025f);
+
+                // NGƯỠNG NGẮT: Cài đặt ở 9.5A và -9.5A (An toàn tuyệt đối trong dải 10A)
+                if (peak_current_max > 9.5f || peak_current_min < -9.5f)
                 {
                     // 1. Khóa cứng ngõ ra PWM phần cứng ngay lập tức
                     __HAL_TIM_MOE_DISABLE(&htim1);
@@ -1128,23 +1148,16 @@ void Process_ADC_And_RF_Transmit(void)
                     freq_run = FREQ_MIN;
                     freq_cmd = FREQ_MIN;
 
-                    // 4. (Tùy chọn) Bật đèn LED trên mạch để báo hiệu lỗi
+                    // 4. Bật đèn LED báo hiệu lỗi Quá dòng
                     LED_ON();
                 }
-                else
-                {
-                    // Tắt LED nếu dòng điện bình thường
-                    // LED_OFF();
-                }
-        // TÌM MIN/MAX CỦA ĐỒ THỊ NGAY TẠI GỐC (BÊN BIẾN TẦN)
+
                 // =======================================================
-                uint16_t local_min = 4095;
-                uint16_t local_max = 0;
-                for (int i = 0; i < ADC_TOTAL_SAMPLES; i++) {
-                    if (adc_copy[i] < local_min) local_min = adc_copy[i];
-                    if (adc_copy[i] > local_max) local_max = adc_copy[i];
-                }
-                if (local_max == local_min) local_max = local_min + 1; // Chống chia cho 0
+                // 3. TÍNH TOÁN CÁC THÔNG SỐ RMS VÀ TẦN SỐ ĐỂ HIỂN THỊ
+                // =======================================================
+                float act_freq = 0;
+                float act_val = 0.0f;
+                Calculate_Actual_Params(adc_copy, freq_run, &act_freq, &act_val, sel);
 
                 // =======================================================
                 // ĐÓNG GÓI SIÊU GỌN GÀNG VÀO 25 GÓI TIN
@@ -1322,41 +1335,87 @@ void Calculate_Actual_Params(uint16_t *buffer, float f_set, float *out_freq_act,
         // =======================================================
         // TÍNH TẦN SỐ THỰC TẾ BẰNG THUẬT TOÁN ZERO-CROSSING
         // =======================================================
-        float smooth_adc[ADC_TOTAL_SAMPLES];
-        smooth_adc[0] = (float)buffer[0];
-        smooth_adc[ADC_TOTAL_SAMPLES - 1] = (float)buffer[ADC_TOTAL_SAMPLES - 1];
+      static  float smooth_adc[ADC_TOTAL_SAMPLES];
+                smooth_adc[0] = (float)buffer[0];
+                smooth_adc[1] = (float)buffer[1];
+                smooth_adc[ADC_TOTAL_SAMPLES - 2] = (float)buffer[ADC_TOTAL_SAMPLES - 2];
+                smooth_adc[ADC_TOTAL_SAMPLES - 1] = (float)buffer[ADC_TOTAL_SAMPLES - 1];
 
-        for (int i = 1; i < ADC_TOTAL_SAMPLES - 1; i++) {
-            smooth_adc[i] = ((float)buffer[i-1] + (float)buffer[i] + (float)buffer[i+1]) / 3.0f;
-        }
-
-        float first_cross = -1.0f;
-        float last_cross = -1.0f;
-        int cycles = 0;
-
-        for (int i = 1; i < ADC_TOTAL_SAMPLES; i++)
-        {
-            if (smooth_adc[i-1] < dc_offset_adc && smooth_adc[i] >= dc_offset_adc)
-            {
-                float v1 = smooth_adc[i-1];
-                float v2 = smooth_adc[i];
-                if (v2 != v1)
-                {
-                    float cross_idx = (i - 1) + (dc_offset_adc - v1) / (v2 - v1);
-                    if (first_cross < 0.0f) first_cross = cross_idx;
-                    last_cross = cross_idx;
-                    cycles++;
+                // Lọc mượt 5 điểm
+                for (int i = 2; i < ADC_TOTAL_SAMPLES - 2; i++) {
+                    smooth_adc[i] = ((float)buffer[i-2] + (float)buffer[i-1] + (float)buffer[i] +
+                                     (float)buffer[i+1] + (float)buffer[i+2]) / 5.0f;
                 }
-            }
-        }
 
-        if (cycles >= 2 && first_cross >= 0.0f) {
-            float points_per_cycle = (last_cross - first_cross) / (cycles - 1);
-            *out_freq_act = (100.0f * f_set) / points_per_cycle;
-        } else {
-            *out_freq_act = f_set;
+                // Tạo 2 vạch Hysteresis (tránh bậc thang)
+                float peak_amplitude = rms_adc * 1.414f;
+                float hysteresis = peak_amplitude * 0.20f;
+                float thresh_high = dc_offset_adc + hysteresis;
+                float thresh_low  = dc_offset_adc - hysteresis;
+
+                float first_cross = -1.0f;
+                float last_cross = -1.0f;
+                int cycles = 0;
+                uint8_t current_state = (smooth_adc[0] > dc_offset_adc) ? 1 : 0;
+
+                for (int i = 1; i < ADC_TOTAL_SAMPLES; i++)
+                {
+                    if (current_state == 0 && smooth_adc[i] > thresh_high)
+                    {
+                        current_state = 1;
+                        float v1 = smooth_adc[i-1];
+                        float v2 = smooth_adc[i];
+                        if (v2 != v1)
+                        {
+                            float cross_idx = (i - 1) + (thresh_high - v1) / (v2 - v1);
+                            if (first_cross < 0.0f) first_cross = cross_idx;
+                            last_cross = cross_idx;
+                            cycles++;
+                        }
+                    }
+                    else if (current_state == 1 && smooth_adc[i] < thresh_low)
+                    {
+                        current_state = 0;
+                    }
+                }
+
+                if (cycles >= 2 && first_cross >= 0.0f) {
+                    float points_per_cycle = (last_cross - first_cross) / (cycles - 1);
+                    *out_freq_act = (100.0f * f_set) / points_per_cycle;
+
+                    // Loại trừ rác đo đạc
+                    if (*out_freq_act > 60.0f || *out_freq_act < 2.0f) {
+                         *out_freq_act = f_set;
+                    }
+                } else {
+                    *out_freq_act = f_set;
+                }
         }
-    }
+/* USER CODE BEGIN 4 */
+
+// ============================================================
+// HÀM PHỤC HỒI NRF24 KHẨN CẤP
+// Gọi khi NRF24 bị stuck: xả FIFO + xóa cờ lỗi + restart
+// ============================================================
+static void NRF24_Recovery(void)
+{
+    NRF24_stopListening();
+
+    // 1. Xả sạch cả TX FIFO (chứa packet lỗi) và RX FIFO
+    NRF24_flush_tx();
+    NRF24_flush_rx();
+
+    // 2. Xóa tất cả cờ ngắt trong STATUS register (0x07)
+    //    Bit 6=RX_DR, Bit 5=TX_DS, Bit 4=MAX_RT → ghi 1 để xóa
+    //    0x70 = 0b0111_0000
+    NRF24_write_register(0x07, 0x70);
+
+    // 3. Chờ NRF24 ổn định
+    HAL_Delay(5);
+
+    // 4. Quay về chế độ lắng nghe
+    NRF24_startListening();
+}
 /* USER CODE END 4 */
 
 /**
