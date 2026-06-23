@@ -95,7 +95,7 @@ TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 // --- THÔNG SỐ ĐỘNG CƠ CẬP NHẬT MỚI ---
-volatile float motor_power_set = 3000.0f; // Công suất điện đặt (W)
+
 volatile float motor_cos_phi = 0.98f;     // Hệ số công suất
 volatile float i_rms_set = 0.0f;          // Biến lưu kết quả dòng điện pha RMS đặt (Ampe)
 // -------------------------------------
@@ -392,20 +392,10 @@ typedef struct {
           float v_phase_rms_set = Vs_local / 1.4142135f;
 
           // 1. Khai báo thông số tải thực tế đang cắm
-              float motor_power_watts = 2000.0f; // Đang cắm tải 50W
+
               float motor_cos_phi = 0.98f;     // Hệ số công suất 0.98
 
-          // 3. Tính dòng điện pha RMS đặt (I = 50 / (U_pha * cos_phi))
-              if (v_phase_rms_set > 2.0f)
-              {
-                  i_rms_set = motor_power_watts / (3.0f * v_phase_rms_set * motor_cos_phi);
 
-              }
-              else
-              {
-                  i_rms_set = 0.0f;
-              }
-          // -----------------------------------------
  }
 void VF_Frequency_Ramp(float target_freq);
 	//Cap nhat SVM
@@ -477,6 +467,7 @@ static bool NRF24_isInitialized(void);
 void Task_RF_Receive(void);
 void Process_ADC_And_RF_Transmit(void);
 uint16_t Read_ADC(void);
+static void NRF24_Recovery(void);
 void Task_RF(void);
 void Task_SVM_Background(void);
 void Start_ADC_Capture_200Samples(void);
@@ -1092,12 +1083,17 @@ void VF_Frequency_Ramp(float target_freq)
 void Process_ADC_And_RF_Transmit(void)
 {
     static uint8_t retry_count = 0;
+    static uint8_t  fail_count       = 0;        // FIX: Đếm lỗi trong 1 frame
+    static uint32_t frame_start_time = 0;        // FIX: Đồng hồ bắt đầu frame
 
     if (adc_ready == 1 && tx_frame_active == 0)
     {
         adc_ready = 0;
         tx_frame_active = 1;
         tx_frame_done = 0;
+        fail_count     = 0;                         // FIX: Reset bộ đếm lỗi
+        frame_start_time = HAL_GetTick();           // FIX: Ghi nhận thời điểm bắt đầu
+
         uint8_t sel = system_state.wave_select;
                 if(sel > 2) sel = 0;
 
@@ -1158,7 +1154,11 @@ void Process_ADC_And_RF_Transmit(void)
                 float act_freq = 0;
                 float act_val = 0.0f;
                 Calculate_Actual_Params(adc_copy, freq_run, &act_freq, &act_val, sel);
+                // 1. Tính điện áp pha RMS hiện tại
+                                float v_phase_rms = Vs_local / 1.4142135f;
 
+                                // 2. Tính CÔNG SUẤT THỰC TẾ đang tiêu thụ (Watt)
+                                float power_act = 3.0f * v_phase_rms * act_val * motor_cos_phi;
                 // =======================================================
                 // ĐÓNG GÓI SIÊU GỌN GÀNG VÀO 25 GÓI TIN
                 // =======================================================
@@ -1174,8 +1174,8 @@ void Process_ADC_And_RF_Transmit(void)
                     // Truyền đi chung 1 kiểu thông số
                                 tx_packets_buffer[pkt_id].freq_set_x10  = (uint16_t)(target_freq * 10.0f);
                                 tx_packets_buffer[pkt_id].freq_act_x10  = (uint16_t)(act_freq * 10.0f);
-                                tx_packets_buffer[pkt_id].rms_set_x10   = (uint16_t)(i_rms_set * 10.0f);
-                                tx_packets_buffer[pkt_id].rms_act_x10   = (uint16_t)(act_val * 10.0f);
+                                tx_packets_buffer[pkt_id].rms_set_x10   = 0;
+                                tx_packets_buffer[pkt_id].rms_act_x10   = (uint16_t)(power_act * 10.0f);
                     // Nhét Min, Max vào để Remote xài
                     tx_packets_buffer[pkt_id].min_adc       = local_min;
                     tx_packets_buffer[pkt_id].max_adc       = local_max;
@@ -1194,9 +1194,21 @@ void Process_ADC_And_RF_Transmit(void)
                 retry_count = 0;
                 last_tx_time = HAL_GetTick();
             }
+    // FIX: KIỂM TRA TIMEOUT TOÀN FRAME (1.5 giây)
+       // Nếu gửi 1 frame mà mất hơn 1.5s → NRF24 bị kẹt, phục hồi ngay
+    if (tx_frame_active && (HAL_GetTick() - frame_start_time > 1500))
+        {
+            NRF24_Recovery();           // Xả FIFO + xóa cờ lỗi + restart listening
+            tx_frame_active    = 0;
+            packets_to_send    = 0;
+            retry_count        = 0;
+            adc_busy           = 0;     // Giải phóng lock ADC phòng khi bị treo
+            Start_ADC_Capture_200Samples();
+            return;
+        }
     if (tx_frame_active && packets_to_send > 0)
     {
-        if (HAL_GetTick() - last_tx_time >=0)
+        if (HAL_GetTick() - last_tx_time >=1)
         {
             NRF24_stopListening();
             ok = NRF24_write(&tx_packets_buffer[current_packet_idx], sizeof(FeedbackPacket_t));
@@ -1208,11 +1220,19 @@ void Process_ADC_And_RF_Transmit(void)
                 retry_count = 0;
             } else {
                 retry_count++;
+                fail_count++;
                 if (retry_count >= 3) {
+                	NRF24_stopListening();
+                	NRF24_flush_tx();                   // Xả packet lỗi khỏi FIFO
+                    NRF24_write_register(0x07, 0x70);  // Xóa MAX_RT + TX_DS + RX_DR
+                    NRF24_startListening();
+
                     current_packet_idx++;
                     packets_to_send--;
                     retry_count = 0;
                 }
+
+
             }
             last_tx_time = HAL_GetTick();
         }
