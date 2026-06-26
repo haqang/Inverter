@@ -95,6 +95,12 @@ TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 // --- THÔNG SỐ ĐỘNG CƠ CẬP NHẬT MỚI ---
+// Cấu hình 4 kênh thượng tầng né hoàn toàn Wi-Fi giống bên Remote
+const uint8_t HOPPING_CHANNELS[4] = {85, 100, 115, 125};
+#define NUM_HOP_CHANNELS 4
+//Biến toàn cục theo dõi kênh hiện tại của Biến tần khi Debug
+volatile uint8_t current_receiver_channel = 0;
+volatile uint32_t last_remote_heartbeat_tick = 0;
 
 volatile float motor_cos_phi = 0.98f;     // Hệ số công suất
 volatile float i_rms_set = 0.0f;          // Biến lưu kết quả dòng điện pha RMS đặt (Ampe)
@@ -469,6 +475,7 @@ void Process_ADC_And_RF_Transmit(void);
 uint16_t Read_ADC(void);
 static void NRF24_Recovery(void);
 void Task_RF(void);
+void NRF24_Seek_And_Lock_Remote(void);
 void Task_SVM_Background(void);
 void Start_ADC_Capture_200Samples(void);
 void Calculate_Actual_Params(uint16_t *buffer, float f_set, float *out_freq_act, float *out_val, uint8_t sel);
@@ -539,6 +546,19 @@ NRF24_begin(GPIOB, GPIO_PIN_6, GPIO_PIN_5, hspi2);// khởi tạo nrf CS ,CE
     	     	   }
 
      }
+     // Cấu hình khớp TX
+            NRF24_setPALevel(RF24_PA_0dB);
+            NRF24_setCRCLength(RF24_CRC_16);    // CRC 16-bit
+            NRF24_setAutoAck(true);
+            NRF24_setDataRate(RF24_250KBPS);
+           NRF24_setChannel(85);
+            NRF24_enableDynamicPayloads();
+            NRF24_openReadingPipe(1, RX_ADDRESS);
+            NRF24_openWritingPipe(TX_ADDRESS);
+            NRF24_flush_rx();
+          // Vào chế độ lắng nghe
+              NRF24_startListening();
+             NRF24_Seek_And_Lock_Remote();
   //Code PFC
   HAL_Delay(500);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, 1);
@@ -570,18 +590,7 @@ NRF24_begin(GPIOB, GPIO_PIN_6, GPIO_PIN_5, hspi2);// khởi tạo nrf CS ,CE
   Build_SVM_Table(freq_run);
   svm_enable = 1;
   HAL_TIM_Base_Start_IT(&htim1);	  // Start TIM1 interrupt for SVM update
-       // Cấu hình khớp TX
-       NRF24_setPALevel(RF24_PA_0dB);
-       NRF24_setCRCLength(RF24_CRC_16);    // CRC 16-bit
-       NRF24_setAutoAck(true);
-       NRF24_setDataRate(RF24_250KBPS);
-       NRF24_setChannel(115);               // kênh 76
-       NRF24_enableDynamicPayloads();
-       NRF24_openReadingPipe(1, RX_ADDRESS);
-       NRF24_openWritingPipe(TX_ADDRESS);
-       NRF24_flush_rx();
-     // Vào chế độ lắng nghe
-         NRF24_startListening();
+
          Start_ADC_Capture_200Samples();
   /* USER CODE END 2 */
 
@@ -600,6 +609,35 @@ NRF24_begin(GPIOB, GPIO_PIN_6, GPIO_PIN_5, hspi2);// khởi tạo nrf CS ,CE
 
 
 	    Process_ADC_And_RF_Transmit();
+	    // ĐẶT BỘ BẢO VỆ MẤT SÓNG Ở ĐÂY (KIỂM TRA LIÊN TỤC TRONG MAIN)
+	          // =================================================================
+	          if (HAL_GetTick() - last_remote_heartbeat_tick > 3000)
+	          {
+	              // 1. CẮT XUNG BẢO VỆ ĐỘNG CƠ NGAY LẬP TỨC
+	              __HAL_TIM_MOE_DISABLE(&htim1);
+
+	              // 2. Trả các biến trạng thái về 0 an toàn
+	              system_state.on_off = 0;
+	              target_freq = FREQ_MIN;
+	              freq_run = FREQ_MIN;
+	              freq_cmd = FREQ_MIN;
+
+	              // 3. Reset lại chip RF đề phòng kẹt phần cứng
+	              NRF24_Recovery();
+	              tx_frame_active    = 0;
+	              packets_to_send    = 0;
+	          //    retry_count        = 0;
+	              adc_busy           = 0;
+
+	              // 4. CHẶN ĐỨNG CHƯƠNG TRÌNH: Ép đi dò lại kênh
+	              // Hàm này sẽ giam mạch biến tần ở đây, động cơ tắt hẳn
+	              // Cho đến khi nào Remote được bật lại và phát lệnh, hàm mới cho thoát ra
+	              NRF24_Seek_And_Lock_Remote();
+
+	              // 5. Khi đã tìm lại được Remote, reset đồng hồ và chạy mẻ ADC mới
+	              last_remote_heartbeat_tick = HAL_GetTick();
+	              Start_ADC_Capture_200Samples();
+	          }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -982,6 +1020,7 @@ void Task_RF_Receive(void)
         if (rx.cmd == 1)
 
         {
+        	last_remote_heartbeat_tick = HAL_GetTick();
             system_state.on_off = rx.state;
             system_state.speed  = rx.speed;
 
@@ -1195,17 +1234,7 @@ void Process_ADC_And_RF_Transmit(void)
                 last_tx_time = HAL_GetTick();
             }
     // FIX: KIỂM TRA TIMEOUT TOÀN FRAME (1.5 giây)
-       // Nếu gửi 1 frame mà mất hơn 1.5s → NRF24 bị kẹt, phục hồi ngay
-    if (tx_frame_active && (HAL_GetTick() - frame_start_time > 1500))
-        {
-            NRF24_Recovery();           // Xả FIFO + xóa cờ lỗi + restart listening
-            tx_frame_active    = 0;
-            packets_to_send    = 0;
-            retry_count        = 0;
-            adc_busy           = 0;     // Giải phóng lock ADC phòng khi bị treo
-            Start_ADC_Capture_200Samples();
-            return;
-        }
+
     if (tx_frame_active && packets_to_send > 0)
     {
         if (HAL_GetTick() - last_tx_time >=1)
@@ -1218,6 +1247,9 @@ void Process_ADC_And_RF_Transmit(void)
                 current_packet_idx++;
                 packets_to_send--;
                 retry_count = 0;
+                // === THÊM DÒNG NÀY ĐỂ GIẢI QUYẾT LỖI TIMEOUT (CÁCH 1) ===
+                                // Reset bộ đếm an toàn vì đã nhận được gói tin ACK phần cứng từ Remote
+                 last_remote_heartbeat_tick = HAL_GetTick();
             } else {
                 retry_count++;
                 fail_count++;
@@ -1435,6 +1467,62 @@ static void NRF24_Recovery(void)
 
     // 4. Quay về chế độ lắng nghe
     NRF24_startListening();
+}
+void NRF24_Seek_And_Lock_Remote(void)
+{
+    LED_ON();
+
+    while(1)
+    {
+        for(uint8_t i = 0; i < NUM_HOP_CHANNELS; i++)
+        {
+            current_receiver_channel = HOPPING_CHANNELS[i];
+
+            // 1. CỤP TAI XUỐNG VỀ CHẾ ĐỘ STANDBY ĐỂ BỘ DAO ĐỘNG PLL ĐƯỢC PHÉP ĐỔI KÊNH
+            NRF24_stopListening();
+
+            // 2. CHUYỂN SANG KÊNH MỚI
+            NRF24_setChannel(current_receiver_channel);
+            NRF24_flush_rx();
+            NRF24_write_register(0x07, 0x40); // Xóa cờ RX_DR bị kẹt nếu có
+            // 3. VỂNH TAI LÊN NGHE Ở KÊNH MỚI
+            NRF24_startListening();
+
+            uint32_t listen_start = HAL_GetTick();
+            while(HAL_GetTick() - listen_start < 500) // Đợi 250ms để bắt chắc chắn chu kỳ 100ms
+            {
+                if(NRF24_available())
+                {
+                    Payload_t rx;
+                    memset(&rx, 0, sizeof(rx));
+                    NRF24_read(&rx, sizeof(rx));
+
+                    if(rx.cmd == 1)
+                    {
+                    	last_remote_heartbeat_tick = HAL_GetTick();
+                        system_state.on_off = rx.state;
+                        system_state.speed  = rx.speed;
+                        system_state.wave_select = rx.wave_select;
+
+                        if(system_state.on_off == 1)
+                        {
+                             target_freq = FREQ_MIN + (system_state.speed / 100.0f) * (FREQ_MAX - FREQ_MIN);
+                             __HAL_TIM_MOE_ENABLE(&htim1);
+                        }
+                        else
+                        {
+                             target_freq = FREQ_MIN;
+                             __HAL_TIM_MOE_DISABLE(&htim1);
+                        }
+                        freq_cmd = target_freq;
+
+                        LED_OFF();
+                        return; // Khóa thành công!
+                    }
+                }
+            }
+        }
+    }
 }
 /* USER CODE END 4 */
 
